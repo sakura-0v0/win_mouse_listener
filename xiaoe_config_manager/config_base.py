@@ -208,16 +208,29 @@ class ConfigBase(ConfigDeclareMixin, ConfigApi):
         self._dispatch(key, value)
 
     def reset(self, key: str) -> None:
-        """把配置恢复成默认值 → 落盘/广播 → 派发一次通知。
+        """把配置恢复成默认值 → 落盘/广播 → 派发通知。
 
         Args:
             key: 配置键名，或 ``'all'``（重置全部）。
 
+        **派发规则**：动了的键就通知，**不看值变没变**。
+
+        * ``reset('某个键')`` → 一条 ``(key, 新值)``；
+        * ``reset('all')`` → **每个键各一条** ``(该键, 新值)``，再补一条
+          ``('all', 整份 dict)``。
+
+        整份重置为什么要逐键发：订阅者通常只关心自己那个键（``cfg.on(键, cb)``
+        或 ``value_changed`` 里判键），只发一条 ``'all'`` 的话它们全都收不到。
+        逐键那 N 条**不做差异比较** —— 即使某个键重置后还是原值也照发，和
+        :meth:`set` 的取向一致（``set`` 一个相同的值同样派发）。
+
+        收尾那条 ``'all'`` 不是"变化通知"，而是唯一能表达**键集合动了**的东西：
+        某个键在重置后被删掉时不在新配置里，逐键发不出值，只有整份里能看出来。
+
         子进程管道（``ConfigInChildProcessPipe``）的 reset 是异步的：它只发消息，
         本地缓存要等主进程把新值带回来才变。那条路径**跳过**这里的当场派发
-        （:meth:`_dispatch_on_reset` 返回 ``False``），改由收到广播时派发一次，
-        且派发的是真正的新值。这样 ``Config`` / ``ConfigMemory`` / 管道三者的
-        reset 都是"一次重置一次通知"，不会出现"先收到旧值、再收到新值"两发。
+        （:meth:`_dispatch_on_reset` 返回 ``False``），改由收到广播时按同样的
+        规则派发，且派发的是真正的新值 —— 不会出现"先收到旧值、再收到新值"两发。
         """
         with self.config_lock:
             if self.default_config_callback:
@@ -227,17 +240,21 @@ class ConfigBase(ConfigDeclareMixin, ConfigApi):
                 ))
             self._apply_reset(key)
             self._flush_locked()
-            # 整份重置得到 dict，单键重置得到单个值，两条路共用一个变量
-            new_value: ConfigValue | ConfigDict
             if key == "all":
-                # 整份重置：键集合与每个键的值都可能变，没有更小的消息可发
                 self.broadcast_all()
                 new_value = self._read_all_locked()
             else:
                 self.broadcast(key, self._read(key), reset=True)
                 new_value = self._read(key)
             dispatch_now = self._dispatch_on_reset()
-        if dispatch_now:
+        if not dispatch_now:
+            return
+
+        if key == "all":
+            for k, v in new_value.items():
+                self._dispatch(k, v)
+            self._dispatch("all", new_value)
+        else:
             self._dispatch(key, new_value)
 
     def _dispatch_on_reset(self) -> bool:

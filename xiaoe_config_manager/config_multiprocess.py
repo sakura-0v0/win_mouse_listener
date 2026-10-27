@@ -330,8 +330,8 @@ class ConfigInChildProcessPipe(ConfigBase):
         """子进程**不在** ``reset`` 返回前当场派发。
 
         此时本地缓存还是旧值（:meth:`_apply_reset` 只发了消息），派发出去的是
-        错的。正确的新值要等主进程广播回来，由 :meth:`_handle_remote` 派发一次。
-        这样三个后端的 ``reset`` 都是"一次重置一次通知"。
+        错的。正确的新值要等主进程广播回来，由 :meth:`_handle_remote` 按和
+        另两个后端一样的规则派发（``reset('all')`` 逐个键各一条 + 一条 ``'all'``）。
         """
         return False
 
@@ -483,12 +483,17 @@ class ConfigInChildProcessPipe(ConfigBase):
             self._dispatch(key, copy.deepcopy(value))
 
     def _replace_all(self, config: dict, dispatch: bool = True) -> None:
-        """整份替换本地缓存，按需派发一次 ``key='all'`` 的通知。
+        """整份替换本地缓存，按需派发通知。
 
-        ``reset('all')`` 之后键集合和每个键的值都可能变，没有比"整份"更小的
-        消息可发。派发的形式要和 ``Config`` / ``ConfigMemory`` 对齐 —— 它们
-        走 ``ConfigBase.reset('all')``，派发的是 ``('all', 整份 dict)`` 一条，
-        而不是逐键发 N 条。
+        派发规则和 ``Config`` / ``ConfigMemory`` 的 ``reset('all')`` 一致：
+        **每个键各一条**（不看值变没变），再来一条 ``('all', 整份 dict)``。
+        整份替换等于"所有键都动了"，所以逐键无条件发。
+
+        只发一条 ``'all'`` 是不够的：订阅者通常只挂在自己那个键上
+        （``cfg.on(键, cb)`` 或 ``value_changed`` 里判键），会完全收不到重置。
+
+        收尾那条 ``'all'`` 负责表达**键集合动了** —— 被删掉的键不在新配置里，
+        逐键发不出值。
 
         Args:
             config: 主进程发来的整份配置。
@@ -497,8 +502,11 @@ class ConfigInChildProcessPipe(ConfigBase):
         """
         with self.config_lock:
             self.config = config
-        if dispatch:
-            self._dispatch("all", copy.deepcopy(config))
+        if not dispatch:
+            return
+        for k, v in config.items():
+            self._dispatch(k, copy.deepcopy(v))
+        self._dispatch("all", copy.deepcopy(config))
 
     def close(self):
         """结束收广播的线程（结束时必须调用）。"""

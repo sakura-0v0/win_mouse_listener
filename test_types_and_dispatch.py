@@ -306,17 +306,43 @@ class TestDispatchCount:
         finally:
             cfg.close()
 
-    def test_reset_all_dispatches_single_all_key(self, workdir):
-        """reset('all') 派发一条 ('all', 整份)，不是逐键 N 条。"""
+    def test_reset_all_dispatches_every_key_then_all(self, workdir):
+        """reset('all') 逐键各一条 + 收尾一条 ('all', 整份)。
+
+        逐键那几条**不做差异比较**：重置后值没变的键也要发 ——
+        「动了就通知」，和 ``set`` 一个相同的值照样派发是同一个取向。
+        """
         for cfg in (DemoFile("ra"), DemoMemory()):
             cfg.set("speed", 99)
             cfg.set("name", "changed")
             hits = []
             cfg.value_changed(lambda key, value: hits.append((key, value)))
             cfg.reset("all")
-            assert [key for key, _ in hits] == ["all"], type(cfg).__name__
-            assert hits[0][1] == {"speed": 50, "name": "demo"}
+            assert [key for key, _ in hits] == ["speed", "name", "all"],                 type(cfg).__name__
+            # 逐键那条带的是该键的新值
+            assert hits[0] == ("speed", 50)
+            assert hits[1] == ("name", "demo")
+            # 收尾那条是整份
+            assert hits[2] == ("all", {"speed": 50, "name": "demo"})
 
+    def test_reset_all_notifies_unchanged_keys_too(self, workdir):
+        """重置后值没变的键也要通知 —— 不看值变没变。"""
+        for cfg in (DemoFile("ru"), DemoMemory()):
+            hits = []
+            cfg.value_changed(lambda key, value: hits.append((key, value)))
+            cfg.reset("all")                     # 一开始就是默认值，什么都没变
+            assert [key for key, _ in hits] == ["speed", "name", "all"],                 type(cfg).__name__
+
+    def test_reset_all_per_key_listener_gets_it(self, workdir):
+        """只订阅自己那个键的监听器，也要收到 reset('all')。"""
+        for cfg in (DemoFile("rk"), DemoMemory()):
+            got = []
+            cfg.on("speed", lambda v: got.append(v))
+            cfg.reset("all")
+            assert got == [50], type(cfg).__name__
+
+    def test_reset_all_child_matches(self):
+        """子进程侧同样：逐键 + all。"""
         cfg, get_q = make_child()
         try:
             cfg.set("speed", 99)
@@ -327,8 +353,9 @@ class TestDispatchCount:
             get_q.put({"call": "getall",
                        "args": [{"speed": 50, "name": "demo"}, CHILD_ID],
                        "origin": CHILD_ID})
-            assert wait_until(lambda: len(hits) == 1), hits
-            assert hits == [("all", {"speed": 50, "name": "demo"})]
+            assert wait_until(lambda: len(hits) == 3), hits
+            assert [k for k, _ in hits] == ["speed", "name", "all"]
+            assert hits[-1] == ("all", {"speed": 50, "name": "demo"})
         finally:
             cfg.close()
 
